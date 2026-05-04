@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_api_jws.py tests/test_api_jwt.py -q)",
+      "Bash(python -m pip install pytest cryptography)"
+    ]
+  }
+}

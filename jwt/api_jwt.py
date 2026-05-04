@@ -20,7 +20,7 @@ from .exceptions import (
     InvalidSubjectError,
     MissingRequiredClaimError,
 )
-from .warnings import RemovedInPyjwt3Warning
+from .warnings import warn_removed_kwargs
 
 if TYPE_CHECKING or bool(os.getenv("SPHINX_BUILD", "")):
     import sys
@@ -120,23 +120,7 @@ class PyJWT:
 
         :raises TypeError: if ``payload`` is not a ``dict``
         """
-        # Check that we get a dict
-        if not isinstance(payload, dict):
-            raise TypeError(
-                "Expecting a dict object, as JWT only supports "
-                "JSON objects as payloads."
-            )
-
-        # Payload
-        payload = payload.copy()
-        for time_claim in ["exp", "iat", "nbf"]:
-            # Convert datetime to a intDate value in known time-format claims
-            if isinstance(payload.get(time_claim), datetime):
-                payload[time_claim] = timegm(payload[time_claim].utctimetuple())
-
-        # Issue #1039, iss being set to non-string
-        if "iss" in payload and not isinstance(payload["iss"], str):
-            raise TypeError("Issuer (iss) must be a string.")
+        payload = self._prepare_payload_claims(payload)
 
         json_payload = self._encode_payload(
             payload,
@@ -152,6 +136,29 @@ class PyJWT:
             json_encoder,
             sort_headers=sort_headers,
         )
+
+    def _prepare_payload_claims(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate and normalize registered claims before JSON-encoding.
+
+        Returns a shallow copy with datetime values in the time-format claims
+        (exp/iat/nbf) converted to integer epoch seconds.
+        """
+        if not isinstance(payload, dict):
+            raise TypeError(
+                "Expecting a dict object, as JWT only supports "
+                "JSON objects as payloads."
+            )
+
+        payload = payload.copy()
+        for time_claim in ("exp", "iat", "nbf"):
+            if isinstance(payload.get(time_claim), datetime):
+                payload[time_claim] = timegm(payload[time_claim].utctimetuple())
+
+        # Issue #1039, iss being set to non-string
+        if "iss" in payload and not isinstance(payload["iss"], str):
+            raise TypeError("Issuer (iss) must be a string.")
+
+        return payload
 
     def _encode_payload(
         self,
@@ -228,14 +235,7 @@ class PyJWT:
         :returns: Decoded JWT with the JOSE Header on the key ``header``, the JWS
          Payload on the key ``payload``, and the JWS Signature on the key ``signature``.
         """
-        if kwargs:
-            warnings.warn(
-                "passing additional kwargs to decode_complete() is deprecated "
-                "and will be removed in pyjwt version 3. "
-                f"Unsupported kwargs: {tuple(kwargs.keys())}",
-                RemovedInPyjwt3Warning,
-                stacklevel=2,
-            )
+        warn_removed_kwargs(kwargs, "decode_complete")
 
         if options is None:
             verify_signature = True
@@ -354,14 +354,7 @@ class PyJWT:
         :rtype: dict[str, typing.Any]
         :returns: the JWT claims
         """
-        if kwargs:
-            warnings.warn(
-                "passing additional kwargs to decode() is deprecated "
-                "and will be removed in pyjwt version 3. "
-                f"Unsupported kwargs: {tuple(kwargs.keys())}",
-                RemovedInPyjwt3Warning,
-                stacklevel=2,
-            )
+        warn_removed_kwargs(kwargs, "decode")
         decoded = self.decode_complete(
             jwt,
             key,

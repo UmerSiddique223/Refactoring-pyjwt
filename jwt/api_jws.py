@@ -21,7 +21,7 @@ from .exceptions import (
     InvalidTokenError,
 )
 from .utils import base64url_decode, base64url_encode
-from .warnings import InsecureKeyLengthWarning, RemovedInPyjwt3Warning
+from .warnings import InsecureKeyLengthWarning, warn_removed_kwargs
 
 if TYPE_CHECKING:
     from .algorithms import AllowedPrivateKeys, AllowedPublicKeys
@@ -127,33 +127,61 @@ class PyJWS:
         is_payload_detached: bool = False,
         sort_headers: bool = True,
     ) -> str:
-        segments: list[bytes] = []
+        algorithm_, is_payload_detached = self._resolve_algorithm(
+            algorithm, key, headers, is_payload_detached
+        )
+        header = self._build_header(algorithm_, headers, is_payload_detached)
 
-        # declare a new var to narrow the type for type checkers
+        json_header = json.dumps(
+            header, separators=(",", ":"), cls=json_encoder, sort_keys=sort_headers
+        ).encode()
+
+        segments: list[bytes] = [base64url_encode(json_header)]
+        segments.append(payload if is_payload_detached else base64url_encode(payload))
+
+        signing_input = b".".join(segments)
+
+        alg_obj = self.get_algorithm_by_name(algorithm_)
+        prepared_key = self._prepare_signing_key(alg_obj, key, stacklevel=3)
+        signature = alg_obj.sign(signing_input, prepared_key)
+
+        segments.append(base64url_encode(signature))
+
+        # Don't put the payload content inside the encoded token when detached
+        if is_payload_detached:
+            segments[1] = b""
+        encoded_string = b".".join(segments)
+
+        return encoded_string.decode("utf-8")
+
+    def _resolve_algorithm(
+        self,
+        algorithm: str | None,
+        key: AllowedPrivateKeys | PyJWK | str | bytes,
+        headers: dict[str, Any] | None,
+        is_payload_detached: bool,
+    ) -> tuple[str, bool]:
         if algorithm is _ALGORITHM_UNSET:
-            if isinstance(key, PyJWK):
-                algorithm_ = key.algorithm_name
-            else:
-                algorithm_ = "HS256"
+            algorithm_ = key.algorithm_name if isinstance(key, PyJWK) else "HS256"
         elif algorithm is None:
-            if isinstance(key, PyJWK):
-                algorithm_ = key.algorithm_name
-            else:
-                algorithm_ = "none"
+            algorithm_ = key.algorithm_name if isinstance(key, PyJWK) else "none"
         else:
             algorithm_ = algorithm
 
-        # Prefer headers values if present to function parameters.
         if headers:
-            headers_alg = headers.get("alg")
-            if headers_alg:
+            if headers.get("alg"):
                 algorithm_ = headers["alg"]
-
-            headers_b64 = headers.get("b64")
-            if headers_b64 is False:
+            if headers.get("b64") is False:
                 is_payload_detached = True
 
-        # Header
+        return algorithm_, is_payload_detached
+
+    def _build_header(
+        self,
+        algorithm_: str,
+        headers: dict[str, Any] | None,
+        is_payload_detached: bool,
+    ) -> dict[str, Any]:
         header: dict[str, Any] = {"typ": self.header_typ, "alg": algorithm_}
 
         if headers:
@@ -169,43 +197,27 @@ class PyJWS:
             # True is the standard value for b64, so no need for it
             del header["b64"]
 
-        json_header = json.dumps(
-            header, separators=(",", ":"), cls=json_encoder, sort_keys=sort_headers
-        ).encode()
+        return header
 
-        segments.append(base64url_encode(json_header))
-
-        if is_payload_detached:
-            msg_payload = payload
-        else:
-            msg_payload = base64url_encode(payload)
-        segments.append(msg_payload)
-
-        # Segments
-        signing_input = b".".join(segments)
-
-        alg_obj = self.get_algorithm_by_name(algorithm_)
+    def _prepare_signing_key(
+        self,
+        alg_obj: Algorithm,
+        key: AllowedPrivateKeys | AllowedPublicKeys | PyJWK | str | bytes,
+        *,
+        stacklevel: int,
+    ) -> Any:
         if isinstance(key, PyJWK):
             key = key.key
-        key = alg_obj.prepare_key(key)
+        prepared_key = alg_obj.prepare_key(key)
 
-        key_length_msg = alg_obj.check_key_length(key)
+        key_length_msg = alg_obj.check_key_length(prepared_key)
         if key_length_msg:
             if self.options.get("enforce_minimum_key_length", False):
                 raise InvalidKeyError(key_length_msg)
-            else:
-                warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=2)
-
-        signature = alg_obj.sign(signing_input, key)
-
-        segments.append(base64url_encode(signature))
-
-        # Don't put the payload content inside the encoded token when detached
-        if is_payload_detached:
-            segments[1] = b""
-        encoded_string = b".".join(segments)
-
-        return encoded_string.decode("utf-8")
+            warnings.warn(
+                key_length_msg, InsecureKeyLengthWarning, stacklevel=stacklevel
+            )
+        return prepared_key
 
     def decode_complete(
         self,
@@ -216,14 +228,7 @@ class PyJWS:
         detached_payload: bytes | None = None,
         **kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        if kwargs:
-            warnings.warn(
-                "passing additional kwargs to decode_complete() is deprecated "
-                "and will be removed in pyjwt version 3. "
-                f"Unsupported kwargs: {tuple(kwargs.keys())}",
-                RemovedInPyjwt3Warning,
-                stacklevel=2,
-            )
+        warn_removed_kwargs(kwargs, "decode_complete")
         merged_options: SigOptions
         if options is None:
             merged_options = self.options
@@ -267,14 +272,7 @@ class PyJWS:
         detached_payload: bytes | None = None,
         **kwargs: dict[str, Any],
     ) -> Any:
-        if kwargs:
-            warnings.warn(
-                "passing additional kwargs to decode() is deprecated "
-                "and will be removed in pyjwt version 3. "
-                f"Unsupported kwargs: {tuple(kwargs.keys())}",
-                RemovedInPyjwt3Warning,
-                stacklevel=2,
-            )
+        warn_removed_kwargs(kwargs, "decode")
         decoded = self.decode_complete(
             jwt, key, algorithms, options, detached_payload=detached_payload
         )
@@ -349,20 +347,13 @@ class PyJWS:
 
         if isinstance(key, PyJWK):
             alg_obj = key.Algorithm
-            prepared_key = key.key
         else:
             try:
                 alg_obj = self.get_algorithm_by_name(alg)
             except NotImplementedError as e:
                 raise InvalidAlgorithmError("Algorithm not supported") from e
-            prepared_key = alg_obj.prepare_key(key)
 
-        key_length_msg = alg_obj.check_key_length(prepared_key)
-        if key_length_msg:
-            if self.options.get("enforce_minimum_key_length", False):
-                raise InvalidKeyError(key_length_msg)
-            else:
-                warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=4)
+        prepared_key = self._prepare_signing_key(alg_obj, key, stacklevel=5)
 
         if not alg_obj.verify(signing_input, prepared_key, signature):
             raise InvalidSignatureError("Signature verification failed")
