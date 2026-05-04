@@ -223,11 +223,4 @@ class PyJWKClient:
         :returns: The matching key, or ``None`` if not found.
         :rtype: PyJWK or None
         """
-        signing_key = None
-
-        for key in signing_keys:
-            if key.key_id == kid:
-                signing_key = key
-                break
-
-        return signing_key
+        return next((key for key in signing_keys if key.key_id == kid), None)

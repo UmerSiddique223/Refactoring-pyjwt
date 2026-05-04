@@ -72,19 +72,46 @@ class PyJWT:
             ),
         }
 
+    # When the caller turns off `verify_signature`, every other verify_* flag
+    # defaults to False (rather than the True from `_get_default_options`).
+    # The caller's explicit values still win — these are only the defaults.
+    _UNVERIFIED_DEFAULTS: dict[str, bool] = {
+        "verify_exp": False,
+        "verify_nbf": False,
+        "verify_iat": False,
+        "verify_aud": False,
+        "verify_iss": False,
+        "verify_sub": False,
+        "verify_jti": False,
+    }
+
+    @staticmethod
+    def _warn_legacy_verify_mismatch(
+        verify: bool | None, verify_signature: bool
+    ) -> None:
+        """Warn when the deprecated ``verify`` kwarg disagrees with options.
+
+        ``stacklevel=3`` points the warning at the original caller of the
+        public API (caller -> public method -> here).
+        """
+        if verify is not None and verify != verify_signature:
+            warnings.warn(
+                "The `verify` argument to `decode` does nothing in PyJWT 2.0 and newer. "
+                "The equivalent is setting `verify_signature` to False in the `options` dictionary. "
+                "This invocation has a mismatch between the kwarg and the option entry.",
+                category=DeprecationWarning,
+                stacklevel=3,
+            )
+
     def _merge_options(self, options: Options | None = None) -> FullOptions:
         if options is None:
             return self.options
 
-        # (defensive) set defaults for verify_x to False if verify_signature is False
         if not options.get("verify_signature", True):
-            options["verify_exp"] = options.get("verify_exp", False)
-            options["verify_nbf"] = options.get("verify_nbf", False)
-            options["verify_iat"] = options.get("verify_iat", False)
-            options["verify_aud"] = options.get("verify_aud", False)
-            options["verify_iss"] = options.get("verify_iss", False)
-            options["verify_sub"] = options.get("verify_sub", False)
-            options["verify_jti"] = options.get("verify_jti", False)
+            # Layer the unverified-defaults under the caller's options so the
+            # caller's explicit values still take precedence. The caller's
+            # dict is not mutated.
+            return {**self.options, **self._UNVERIFIED_DEFAULTS, **options}
         return {**self.options, **options}
 
     def encode(
@@ -242,17 +269,7 @@ class PyJWT:
         else:
             verify_signature = options.get("verify_signature", True)
 
-        # If the user has set the legacy `verify` argument, and it doesn't match
-        # what the relevant `options` entry for the argument is, inform the user
-        # that they're likely making a mistake.
-        if verify is not None and verify != verify_signature:
-            warnings.warn(
-                "The `verify` argument to `decode` does nothing in PyJWT 2.0 and newer. "
-                "The equivalent is setting `verify_signature` to False in the `options` dictionary. "
-                "This invocation has a mismatch between the kwarg and the option entry.",
-                category=DeprecationWarning,
-                stacklevel=2,
-            )
+        self._warn_legacy_verify_mismatch(verify, verify_signature)
 
         merged_options = self._merge_options(options)
 
@@ -455,18 +472,29 @@ class PyJWT:
         if not isinstance(payload.get("jti"), str):
             raise InvalidJTIError("JWT ID must be a string")
 
+    # (exception class, error message) per time claim, used by `_coerce_int_claim`
+    # when the claim value cannot be converted to int.
+    _INT_CLAIM_ERRORS: dict[str, tuple[type[Exception], str]] = {
+        "iat": (InvalidIssuedAtError, "Issued At claim (iat) must be an integer."),
+        "nbf": (DecodeError, "Not Before claim (nbf) must be an integer."),
+        "exp": (DecodeError, "Expiration Time claim (exp) must be an integer."),
+    }
+
+    def _coerce_int_claim(self, payload: dict[str, Any], claim: str) -> int:
+        """Coerce a numeric claim to int, raising the claim-specific error class."""
+        try:
+            return int(payload[claim])
+        except ValueError:
+            error_cls, message = self._INT_CLAIM_ERRORS[claim]
+            raise error_cls(message) from None
+
     def _validate_iat(
         self,
         payload: dict[str, Any],
         now: float,
         leeway: float,
     ) -> None:
-        try:
-            iat = int(payload["iat"])
-        except ValueError:
-            raise InvalidIssuedAtError(
-                "Issued At claim (iat) must be an integer."
-            ) from None
+        iat = self._coerce_int_claim(payload, "iat")
         if iat > (now + leeway):
             raise ImmatureSignatureError("The token is not yet valid (iat)")
 
@@ -476,11 +504,7 @@ class PyJWT:
         now: float,
         leeway: float,
     ) -> None:
-        try:
-            nbf = int(payload["nbf"])
-        except ValueError:
-            raise DecodeError("Not Before claim (nbf) must be an integer.") from None
-
+        nbf = self._coerce_int_claim(payload, "nbf")
         if nbf > (now + leeway):
             raise ImmatureSignatureError("The token is not yet valid (nbf)")
 
@@ -490,13 +514,7 @@ class PyJWT:
         now: float,
         leeway: float,
     ) -> None:
-        try:
-            exp = int(payload["exp"])
-        except ValueError:
-            raise DecodeError(
-                "Expiration Time claim (exp) must be an integer."
-            ) from None
-
+        exp = self._coerce_int_claim(payload, "exp")
         if exp <= (now - leeway):
             raise ExpiredSignatureError("Signature has expired")
 

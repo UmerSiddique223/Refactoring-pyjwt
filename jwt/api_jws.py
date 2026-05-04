@@ -38,15 +38,15 @@ class PyJWS:
         algorithms: Sequence[str] | None = None,
         options: SigOptions | None = None,
     ) -> None:
-        self._algorithms = get_default_algorithms()
+        default_algorithms = get_default_algorithms()
         self._valid_algs = (
-            set(algorithms) if algorithms is not None else set(self._algorithms)
+            set(algorithms) if algorithms is not None else set(default_algorithms)
         )
-
-        # Remove algorithms that aren't on the whitelist
-        for key in list(self._algorithms.keys()):
-            if key not in self._valid_algs:
-                del self._algorithms[key]
+        self._algorithms = {
+            name: alg
+            for name, alg in default_algorithms.items()
+            if name in self._valid_algs
+        }
 
         self.options: SigOptions = self._get_default_options()
         if options is not None:
@@ -302,10 +302,7 @@ class PyJWS:
         except ValueError as err:
             raise DecodeError("Not enough segments") from err
 
-        try:
-            header_data = base64url_decode(header_segment)
-        except (TypeError, binascii.Error) as err:
-            raise DecodeError("Invalid header padding") from err
+        header_data = self._decode_segment(header_segment, "header")
 
         try:
             header: dict[str, Any] = json.loads(header_data)
@@ -315,17 +312,22 @@ class PyJWS:
         if not isinstance(header, dict):
             raise DecodeError("Invalid header string: must be a json object")
 
-        try:
-            payload = base64url_decode(payload_segment)
-        except (TypeError, binascii.Error) as err:
-            raise DecodeError("Invalid payload padding") from err
-
-        try:
-            signature = base64url_decode(crypto_segment)
-        except (TypeError, binascii.Error) as err:
-            raise DecodeError("Invalid crypto padding") from err
+        payload = self._decode_segment(payload_segment, "payload")
+        signature = self._decode_segment(crypto_segment, "crypto")
 
         return (payload, signing_input, header, signature)
+
+    @staticmethod
+    def _decode_segment(segment: bytes, label: str) -> bytes:
+        """base64url-decode a JWT segment, wrapping decode failures.
+
+        ``label`` is one of ``"header"``, ``"payload"``, ``"crypto"`` and
+        is interpolated into the error message ("Invalid <label> padding").
+        """
+        try:
+            return base64url_decode(segment)
+        except (TypeError, binascii.Error) as err:
+            raise DecodeError(f"Invalid {label} padding") from err
 
     def _verify_signature(
         self,

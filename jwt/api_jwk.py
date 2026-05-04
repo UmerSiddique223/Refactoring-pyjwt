@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -14,6 +13,21 @@ from .exceptions import (
     PyJWTError,
 )
 from .types import JWKDict
+
+# JWK `kty` -> default algorithm when ``alg`` is not present and `kty` is
+# not curve-dependent. EC and OKP need additional `crv` dispatch and are
+# handled in `_infer_algorithm_from_kty`.
+_KTY_DEFAULT_ALGORITHM = {
+    "RSA": "RS256",
+    "oct": "HS256",
+}
+
+_EC_CRV_TO_ALGORITHM = {
+    "P-256": "ES256",
+    "P-384": "ES384",
+    "P-521": "ES512",
+    "secp256k1": "ES256K",
+}
 
 
 class PyJWK:
@@ -38,32 +52,7 @@ class PyJWK:
             algorithm = self._jwk_data.get("alg", None)
 
         if not algorithm:
-            # Determine alg with kty (and crv).
-            crv = self._jwk_data.get("crv", None)
-            if kty == "EC":
-                if crv == "P-256" or not crv:
-                    algorithm = "ES256"
-                elif crv == "P-384":
-                    algorithm = "ES384"
-                elif crv == "P-521":
-                    algorithm = "ES512"
-                elif crv == "secp256k1":
-                    algorithm = "ES256K"
-                else:
-                    raise InvalidKeyError(f"Unsupported crv: {crv}")
-            elif kty == "RSA":
-                algorithm = "RS256"
-            elif kty == "oct":
-                algorithm = "HS256"
-            elif kty == "OKP":
-                if not crv:
-                    raise InvalidKeyError(f"crv is not found: {self._jwk_data}")
-                if crv == "Ed25519":
-                    algorithm = "EdDSA"
-                else:
-                    raise InvalidKeyError(f"Unsupported crv: {crv}")
-            else:
-                raise InvalidKeyError(f"Unsupported kty: {kty}")
+            algorithm = self._infer_algorithm_from_kty(kty)
 
         if not has_crypto and algorithm in requires_cryptography:
             raise MissingCryptographyError(
@@ -80,6 +69,30 @@ class PyJWK:
             ) from None
 
         self.key = self.Algorithm.from_jwk(self._jwk_data)
+
+    def _infer_algorithm_from_kty(self, kty: str) -> str:
+        """Map (kty, crv) to the JWA algorithm name used to interpret this key.
+
+        Falls back to ``ES256`` when an EC key omits ``crv``.
+        """
+        crv = self._jwk_data.get("crv", None)
+        if kty == "EC":
+            if not crv:
+                return "ES256"
+            try:
+                return _EC_CRV_TO_ALGORITHM[crv]
+            except KeyError:
+                raise InvalidKeyError(f"Unsupported crv: {crv}") from None
+        if kty == "OKP":
+            if not crv:
+                raise InvalidKeyError(f"crv is not found: {self._jwk_data}")
+            if crv == "Ed25519":
+                return "EdDSA"
+            raise InvalidKeyError(f"Unsupported crv: {crv}")
+        try:
+            return _KTY_DEFAULT_ALGORITHM[kty]
+        except KeyError:
+            raise InvalidKeyError(f"Unsupported kty: {kty}") from None
 
     @staticmethod
     def from_dict(obj: JWKDict, algorithm: str | None = None) -> PyJWK:
@@ -167,22 +180,17 @@ class PyJWKSet:
         return PyJWKSet.from_dict(obj)
 
     def __getitem__(self, kid: str) -> PyJWK:
-        for key in self.keys:
-            if key.key_id == kid:
-                return key
-        raise KeyError(f"keyset has no key for kid: {kid}")
+        key = self.find_by_kid(kid)
+        if key is None:
+            raise KeyError(f"keyset has no key for kid: {kid}")
+        return key
 
     def __iter__(self) -> Iterator[PyJWK]:
         return iter(self.keys)
 
-
-class PyJWTSetWithTimestamp:
-    def __init__(self, jwk_set: PyJWKSet):
-        self.jwk_set = jwk_set
-        self.timestamp = time.monotonic()
-
-    def get_jwk_set(self) -> PyJWKSet:
-        return self.jwk_set
-
-    def get_timestamp(self) -> float:
-        return self.timestamp
+    def find_by_kid(self, kid: str) -> PyJWK | None:
+        """Return the key matching ``kid``, or ``None`` if no key matches."""
+        for key in self.keys:
+            if key.key_id == kid:
+                return key
+        return None

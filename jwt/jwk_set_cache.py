@@ -1,31 +1,32 @@
 import time
 from typing import Optional
 
-from .api_jwk import PyJWKSet, PyJWTSetWithTimestamp
+from .api_jwk import PyJWKSet
 
 
 class JWKSetCache:
     def __init__(self, lifespan: float) -> None:
-        self.jwk_set_with_timestamp: Optional[PyJWTSetWithTimestamp] = None
+        self._jwk_set: Optional[PyJWKSet] = None
+        self._timestamp: float = 0.0
         self.lifespan = lifespan
 
-    def put(self, jwk_set: PyJWKSet) -> None:
+    def put(self, jwk_set: Optional[PyJWKSet]) -> None:
         if jwk_set is not None:
-            self.jwk_set_with_timestamp = PyJWTSetWithTimestamp(jwk_set)
+            self._jwk_set = jwk_set
+            self._timestamp = time.monotonic()
         else:
             # clear cache
-            self.jwk_set_with_timestamp = None
+            self._jwk_set = None
+            self._timestamp = 0.0
 
     def get(self) -> Optional[PyJWKSet]:
-        if self.jwk_set_with_timestamp is None or self.is_expired():
+        if self._jwk_set is None or self.is_expired():
             return None
-
-        return self.jwk_set_with_timestamp.get_jwk_set()
+        return self._jwk_set
 
     def is_expired(self) -> bool:
         return (
-            self.jwk_set_with_timestamp is not None
+            self._jwk_set is not None
             and self.lifespan > -1
-            and time.monotonic()
-            > self.jwk_set_with_timestamp.get_timestamp() + self.lifespan
+            and time.monotonic() > self._timestamp + self.lifespan
         )
